@@ -1,0 +1,735 @@
+---
+title: "CM Code"
+output: html_document
+date: "2025-06-05"
+---
+
+# Setup 
+
+In this section, we load the data, and install/load all packages needed for the analyses. 
+
+```{r 0.1 Setup, include=FALSE}
+
+library(haven)
+library(readr)
+library(dplyr)
+
+# Loading the packages 
+
+library(lm.beta)
+library(ez)
+library(pwr)
+library(tidyverse)      # Data wrangling
+library(psych)          # Used to undertake the EFA and related analyses 
+library(GPArotation)    # Called by psych to run certain parts of the EFA 
+library(EFA.dimensions) # Used for the RAWPAR function
+library(lavaan)      # CFA/SEM
+library(semPlot)     # For use of the `semPaths()` function to create the figure
+library(semTools)    # Skew and kurtosis        
+library(semhelpinghands)
+library(dplyr)
+library(naniar)
+library(Hmisc)
+library(corrplot)
+library(ggpubr)
+library(skimr)
+library(MVN)
+library(car)
+library(aod)
+library(knitr)
+library(kableExtra)
+library(data.table)
+library(ggplot2)
+library(stringr)
+library(extrafont)
+library(fontcm)
+library(gridExtra)
+library(tidyquant)
+library(devtools)
+library(ltm)
+library(rstatix)
+library(reshape2)
+library(lsr)
+library(ggraph)
+library(igraph)
+library(colorspace)
+library(lme4)
+library(lmerTest)
+library(effectsize) 
+
+
+options(scipen = 999)
+
+```
+
+```{r 0.3 Adding HIT etc.}
+
+# Adding stimulus type 
+## 0 = lean 
+## 1 = rich
+
+
+task <- task %>%
+  mutate(
+    stimulus_type = case_when(
+      
+      # Group 1: expgroup = 1 (short = rich), 
+      values.expgroup == 1 & trialcode == "shortmouth" ~ 1,  
+      values.expgroup == 1 & trialcode == "longmouth"  ~ 0,
+      
+      # Group 2: expgroup = 2,
+      values.expgroup == 2 & trialcode == "longmouth"  ~ 1,  
+      values.expgroup == 2 & trialcode == "shortmouth" ~ 0,
+
+      TRUE ~ NA_real_  
+    )
+  )
+
+
+
+# Defining trial_type as "rich" and "lean"
+
+task <- task %>%
+  mutate(
+    trial_type = case_when(
+      
+      # Group 1: expgroup = 1 (short = rich)
+      values.expgroup == 1 & stimulus_type == 1 ~ "rich",  
+      values.expgroup == 1 & stimulus_type == 0 ~ "lean",
+      
+      # Group 3: expgroup = 2
+      values.expgroup == 2 & stimulus_type == 1 ~ "rich",  
+      values.expgroup == 2 & stimulus_type == 0 ~ "lean", 
+    )
+  )
+
+
+
+# Adding HIT, FA, MISS, CR
+
+task <- task %>%
+  mutate(
+    # HIT: Correct response on a RICH trial
+    hit = as.numeric(case_when(
+      trial_type == "rich" & correct == 1 ~ 1, 
+      TRUE ~ 0  
+    )),
+    
+    # FA: Incorrect response on a LEAN trial
+    fa = as.numeric(case_when(
+      trial_type == "lean" & correct == 0 ~ 1,  # LEAN and incorrect
+      TRUE ~ 0 
+    )),
+    
+    # MISS: Incorrect response on a RICH trial
+    miss = as.numeric(case_when(
+      trial_type == "rich" & correct == 0 ~ 1,  # RICH and incorrect
+      TRUE ~ 0  # Otherwise
+    )),
+    
+    # CR: Correct response on a LEAN trial
+    cr = as.numeric(case_when(
+      trial_type == "lean" & correct == 1 ~ 1,  # LEAN and correct
+      TRUE ~ 0  # Otherwise
+    ))
+  )
+
+
+# Adding r_t = 1 (reward trial) and r_t = 0 (not a reward trial), and organising trial order for all participants 
+
+
+task <- task %>%
+  arrange(subject, values.blockcount, trialnum) %>%  # Sort correctly first
+  group_by(subject) %>%
+  mutate(
+    trial_order = if_else(
+      trialcode %in% c("shortmouth", "longmouth"),
+      cumsum(trialcode %in% c("shortmouth", "longmouth")),
+      NA_integer_
+    ),
+    r_t = if_else(lead(values.total) - values.total == 4, 1, 0)
+  ) %>%
+  ungroup()
+
+
+
+```
+
+```{r Removing feedback trials}
+
+task <- task %>%
+  filter(!(trialcode %in% c("positivefeedback_short", "positivefeedback_long")))
+
+
+```
+
+### Adding 'rewarded' = 0 or 1 
+
+```{r Adding preceding trial description}
+
+
+task <- task %>%
+  arrange(subject, trial_order) %>%  
+  group_by(subject) %>%              
+  mutate(
+    preceding_trial = case_when(
+      lag(trial_type) == "rich" & lag(r_t) == 1 ~ "rich rewarded",
+      lag(trial_type) == "rich" & lag(r_t) == 0 ~ "rich non-rewarded",
+      lag(trial_type) == "lean" & lag(r_t) == 1 ~ "lean rewarded",
+      lag(trial_type) == "lean" & lag(r_t) == 0 ~ "lean non-rewarded",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  ungroup()
+
+
+
+
+```
+
+```{r Standardising response format}
+
+task <- task %>%
+  mutate(
+    response_stan = case_when(
+      # Response Key Assignment 1 (e = short, i = long)
+      (stimulus_type == 1 & hit == 1) ~ 18,  # RICH presented, HIT
+      (stimulus_type == 1 & miss == 1) ~ 23,  # RICH presented, MISS
+      (stimulus_type == 0 & fa == 1) ~ 18, # LEAN presented, FA 
+      (stimulus_type == 0 & cr == 1) ~ 23, # LEAN presented, CR
+      TRUE ~ response  # Keep any other values as-is
+    ),
+    a_t = case_when(
+      response_stan == 18 ~ 18,  
+      response_stan == 23 ~ 23, 
+      TRUE ~ response
+    )
+  )
+
+
+```
+
+```{r 1.1.1 Ensuring data is numeric}
+
+
+# Ensuring the data is numeric 
+
+task <- task %>%
+  mutate(hit = ifelse(hit == "1", 1, 0),
+         fa = ifelse(fa == "1", 1, 0),
+         miss = ifelse(miss == "1", 1, 0),
+         cr = ifelse(cr == "1", 1, 0))
+      
+
+# Convert 'subject' to a factor
+task$subject <- factor(task$subject)
+
+
+```
+
+```{r 1.1.2 blainstats: Creating homebase dataset with all statistics needed}
+
+# Calculating the SDT statistics needed to replicate Blain's analyses 
+
+blainstats <- task %>%
+  group_by(subject, values.blockcount, values.expgroup, values.responsekeyassignment) %>%
+  summarise(
+    HIT = sum(hit), 
+    FA = sum(fa), 
+    MISS = sum(miss), 
+    CR = sum(cr), 
+    HR = HIT / (HIT + MISS),  
+    FAR = FA / (FA + CR), 
+    HR_adj = ifelse(HR == 0, 0.0001, ifelse(HR == 1, 0.9999, HR)),
+    FAR_adj = ifelse(FAR == 0, 0.0001, ifelse(FAR == 1, 0.9999, FAR)),
+    
+    # calculating z-scores for the HIT and FALSE ALARM rates (and adjusting to account for 0 and 1)
+    
+    z_HR = qnorm(HR_adj),
+    z_FAR = qnorm(FAR_adj),
+    z_HR_adj = ifelse(z_HR == 0, 0.0001, z_HR),
+    z_FAR_adj = ifelse(z_FAR == 0, 0.0001, z_FAR),
+    
+    # ordinate 
+    
+    o_HR = dnorm(z_HR_adj),
+    o_FAR = dnorm(z_FAR_adj),
+    
+    # calculating SDT statistics 
+    
+    log_b = 0.5 * log((HIT + 0.5) * (FA + 0.5) / ((MISS + 0.5) * (CR + 0.5))),
+    log_d = 0.5 * log((HIT + 0.5) * (CR + 0.5) / ((MISS + 0.5) * (FA + 0.5))),
+    beta = o_HR / o_FAR,
+    dprime = z_HR_adj - z_FAR_adj,
+    .groups = 'drop'
+  )%>%
+  pivot_wider(
+    names_from = values.blockcount, 
+    values_from = c(HIT, FA, MISS, CR, HR, FAR, HR_adj, FAR_adj, z_HR, z_FAR, z_HR_adj, z_FAR_adj, o_HR, o_FAR, log_b, log_d, beta, dprime)
+  ) %>%
+  mutate(
+    diffscore1_logb = log_b_2 - log_b_1, 
+    diffscore2_logb = log_b_3 - log_b_1, 
+    avbeta = rowMeans(dplyr::select(., starts_with("beta_1"), starts_with("beta_2"), starts_with("beta_3")), na.rm = TRUE),
+    avdprime = rowMeans(dplyr::select(., starts_with("dprime_1"), starts_with("dprime_2"), starts_with("dprime_3")), na.rm = TRUE)
+  ) %>%
+  rowwise() %>%
+  mutate(
+    total_hits = HIT_1 + HIT_2 + HIT_3, 
+    total_cr = CR_1 + CR_2 + CR_3, 
+    total_miss = MISS_1 + MISS_2 + MISS_3, 
+    total_fa = FA_1 + FA_2 + FA_3,
+    total_trials = total_hits + total_cr + total_miss + total_fa,
+    accuracy = (total_hits + total_cr) / total_trials, 
+    log_b_overall = 0.5 * log((total_hits + 0.5) * (total_fa + 0.5) / ((total_miss + 0.5) * (total_cr + 0.5))), 
+    log_d_overall = 0.5 * log((total_hits + 0.5) * (total_cr + 0.5) / ((total_miss + 0.5) * (total_fa + 0.5))), 
+    total_hits_baseline = HIT_2 + HIT_3, 
+    total_cr_baseline = CR_2 + CR_3, 
+    total_miss_baseline = MISS_2 + MISS_3, 
+    total_fa_baseline = FA_2 + FA_3,
+    log_b_baseline = 0.5 * log((total_hits_baseline + 0.5) * (total_fa_baseline + 0.5) / ((total_miss_baseline + 0.5) * (total_cr_baseline + 0.5))), 
+    log_d_baseline = 0.5 * log((total_hits_baseline + 0.5) * (total_cr_baseline + 0.5) / ((total_miss_baseline + 0.5) * (total_fa_baseline + 0.5)))
+  ) %>%
+  ungroup() %>%
+  mutate(
+    bias_group = if_else(log_b_overall > 0, "Positive Bias", "Negative Bias")
+  )
+
+
+length(unique(blainstats$subject))
+# Count how many times each subject appears
+table(blainstats$subject)
+
+# Or, in dplyr:
+library(dplyr)
+blainstats %>%
+  count(subject) %>%
+  arrange(desc(n))
+
+
+questionnairescored_sdt <- blainstats %>%
+  inner_join(questionnaire_scored, by = c("subject" = "subject"))
+
+
+```
+
+
+
+#### COMPUTATIONAL MODEL CODE 
+
+## 1. Defining functions 
+
+```{r 1. Function for observed choice: W(a_t,s_t)}
+
+
+### Computing the weight of the actual choice (key) response = W(a_t,s_t)
+
+
+compute_Wt <- function(a_t, trial_type, gamma, zeta, Q_table, I_function) {
+
+  # Instructed choice 
+  I_value <- I_function(a_t, trial_type)
+
+  # Q-values using trialcode (adjusted for each trial): Q(a_t, s_t)
+  Q_st <- Q_table[[trial_type]][[as.character(a_t)]]  # 
+
+  # Q-value for key choice, given the alternative stimulus: Q(a_t, s̅_t)
+  alt_trial_type<- ifelse(trial_type == "rich", "lean", "rich")
+  Q_alt_st <- Q_table[[alt_trial_type]][[as.character(a_t)]] 
+
+  # Compute W_t for the chosen response 
+  W_t <- gamma * I_value + zeta * Q_st + (1 - zeta) * Q_alt_st
+  return(W_t)
+}
+
+
+```
+
+```{r 2. Function for alternate choice: W(ā_t,s_t)}
+
+
+### Computing the weight of the alternate key choice W(ā_t,s_t)
+
+compute_Wt_alt <- function(a_t, trial_type, gamma, zeta, Q_table, I_function) {
+
+  # Instructed choice value for the key not pressed (the opposite key: # If a_t is 18, alt_key is 23 etc.)
+  alt_key <- ifelse(a_t == 18, 23, 18)  
+  I_alt_value <- I_function(alt_key, trial_type)  # mapping the alternate key to the instructions
+
+  # Q-value for pressing the alternate key given the **same trial stimulus**
+  Q_alt_response <- Q_table[[trial_type]][[as.character(alt_key)]]  # Q(ā_t,s_t)
+
+  # Q-value for pressing the alternate key if the **other trial stimulus** was presented = # Q(ā_t, s̅_t)
+  alt_trial_type <- ifelse(trial_type == "rich", "lean", "rich")  # Alternate trial code
+  Q_alt_response_if_other_stimulus <- Q_table[[alt_trial_type]][[as.character(alt_key)]]  
+
+  # Compute Wt for the alternate action
+  Wt_alt <- gamma * I_alt_value + zeta * Q_alt_response + (1 - zeta) * Q_alt_response_if_other_stimulus
+  return(Wt_alt)
+}
+
+
+
+```
+
+```{r 3. Softmax function for probability of observed choice: p_at_st}
+
+# Function to calculate the probability based on the softmax function
+### p(a_t | s_t) = 1 / (1 + exp[-(W_t - Wt_alt)])
+### plogis is the same as: 1 / (1 + exp[-(W_t - Wt_alt)])
+
+softmax_function <- function(Wt, Wt_alt) {
+  p_at_st <- plogis(Wt - Wt_alt)
+  return(p_at_st)
+}
+
+
+
+```
+
+```{r 4. Function to update Q-value after each trial: Q_t_1}
+
+### Q_t+1(a_t, s_t) = Qt(a_t, s_t) + ε * (ρ*r_t - Q_t(a_t, s_t))
+
+## ε = learning rate, 0 < ε < 1
+## ρ = reward sensitivity
+## r_t = reward received or not, = 1 or = 0
+
+
+compute_updatedqvalue <- function(Q_table, rho, epsilon, r_t, trial_type, a_t) {
+  Q_value <- Q_table[[trial_type]][[as.character(a_t)]]
+  prediction_error <- (rho * r_t) - Q_value
+  Q_t_1 <- Q_value + epsilon * prediction_error
+  return(Q_t_1)
+}
+
+
+
+
+```
+
+
+## 2. Main likelihood function 
+
+Four free parameters: rho, epsilon, gamma, zeta 
+
+```{r Overall likelihood function}
+
+overall_likelihood_function <- function(data, par) {
+  
+  rho <- par[1]
+  epsilon <- par[2]
+  gamma <- par[3]
+  zeta <- par[4]
+  
+  
+  # Initialise Q_table
+
+  Q_table <- list(
+      "rich" = list("18" = 0,"23" = 0),
+      "lean" = list("18" = 0,"23" = 0))
+
+
+  # Define I_function
+  I_function <- function(a_t, trial_type) {
+    correct_response <- ifelse(trial_type == "rich", 18, 23)
+    return(ifelse(a_t == correct_response, 1, 0))
+  }
+  
+  n_trials <- nrow(data)
+  choice_likelihood <- rep(NA, n_trials)
+  
+  for (trial_ix in 1:n_trials) {
+    a_t <- as.numeric(data$a_t[trial_ix])
+    r_t <- as.numeric(data$r_t[trial_ix])
+    trial_type <- as.character(data$trial_type[trial_ix])
+    r_t <- ifelse(is.na(r_t), 0, r_t)
+    
+    # Compute weights
+    Wt <- compute_Wt(a_t, trial_type, gamma, zeta, Q_table, I_function)
+    Wt_alt <- compute_Wt_alt(a_t, trial_type, gamma, zeta, Q_table, I_function)
+    
+    # Softmax probability
+    p_at_st <- max(plogis(Wt - Wt_alt), 1e-10)
+    
+    choice_likelihood[trial_ix] <- p_at_st
+    
+    # Update Q-value
+    Q_value <- Q_table[[trial_type]][[as.character(a_t)]]
+    Q_table[[trial_type]][[as.character(a_t)]] <- Q_value + epsilon * ((rho * r_t) - Q_value)
+  }
+  
+  neg_ll <- -sum(log(choice_likelihood), na.rm = TRUE)
+  return(neg_ll)
+}
+
+
+
+```
+
+### Running on a whole dataset (398 participants)
+
+```{r Fitting model: random initial values for each participant}
+
+# Fitting model to each participant
+subject_ids <- unique(task$subject)
+fit_results <- list()
+
+for (sub in subject_ids) {
+  
+  single_participant_data <- task[task$subject == sub, ]
+  
+  # specify the number of independent fits to calculate per participant
+  n_repeats_per_participant <- 5
+  
+  # initialise some container variables to keep track of which fit is best
+  best_fit <- NULL
+  best_fit_val <- 1e10 # initialise at a very large value (1 x 10^10)
+  
+  for (rep in 1:n_repeats_per_participant){
+    
+    # Initial parameter values
+    par_init <- c(
+       rho     = runif(n=1, min=,   max=5), 
+       epsilon = runif(n=1, min=0,   max=1), 
+       gamma   = runif(n=1, min=0,   max=5),
+       zeta    = runif(n=1, min=0.5, max=1)
+    )
+    
+    # Fit model
+    fit <- optim(
+      par = par_init,
+      fn = overall_likelihood_function,
+      data = single_participant_data,
+      method = "L-BFGS-B",
+      lower = c(-Inf, 0, 0, 0.5),
+      upper = c(Inf, 1, Inf, 1)
+    )
+    
+    # check to see whether this fit (a) has converged, and (b) is better than the previous best if so
+    if (fit$convergence == 0 & fit$value < best_fit_val){
+    
+      # store fit results
+      fit_results[[as.character(sub)]] <- list(
+        par = fit$par,
+        negloglik = fit$value,
+        convergence = fit$convergence
+      )
+      
+      # update container with new best-fit value
+      best_fit_val <- fit$value
+      
+    } else if (rep == n_repeats_per_participant & best_fit_val == 1e10) {
+      
+      # if no fits have converged, store the final iteration 
+      fit_results[[as.character(sub)]] <- list(
+        par = fit$par,
+        negloglik = fit$value,
+        convergence = fit$convergence
+      )
+      
+    }
+    
+  }
+}
+
+# Summarise results
+fit_summary_bestfit_task <- do.call(rbind, lapply(names(fit_results), function(sub_id) {
+  res <- fit_results[[sub_id]]
+  data.frame(
+    subject = sub_id,
+    rho = res$par[["rho"]],
+    epsilon = res$par[["epsilon"]],
+    gamma = res$par[["gamma"]],
+    zeta = res$par[["zeta"]],
+    negloglik = res$negloglik,
+    convergence = res$convergence,
+    stringsAsFactors = FALSE
+  )
+}))
+
+
+write.csv(fit_summary_bestfit_task, "fit_summary.csv", row.names = FALSE)
+
+
+```
+
+
+
+
+
+###### Smaller datasets for testing 
+
+## A. Running function for a single participant
+
+```{r Single participant data}
+
+## extract data from a single participant
+participant_to_fit <- 1
+single_participant_data <- subset(task, task$subject == unique(task$subject)[participant_to_fit])
+
+```
+
+```{r Fitting model}
+
+
+fit_results <- list()
+
+# Initial parameter values
+par_init <- c(
+   rho     = runif(n=1, min=0,   max=5), 
+   epsilon = runif(n=1, min=0,   max=1), 
+   gamma   = runif(n=1, min=0,   max=5), 
+   zeta    = runif(n=1, min=0.5, max=1)
+)
+
+# Fit model
+fit <- optim(
+  par = par_init,
+  fn = overall_likelihood_function,
+  data = single_participant_data,
+  method = "L-BFGS-B",
+  lower = c(0, 0, 0, 0.5),
+  upper = c(Inf, 1, Inf, 1)
+)
+
+# Store results without using 'sub'
+fit_results[["participant_1"]] <- list(
+  par = fit$par,
+  negloglik = fit$value,
+  convergence = fit$convergence
+)
+
+
+print(fit_results)
+
+```
+
+### B. Testing on a smaller dataset (50 participants)
+
+```{r Generating dataset of 50}
+
+task$subject <- as.character(task$subject)
+set.seed(123)
+sampled_ids <- sample(unique(task$subject), 50)
+task_sampled <- task[task$subject %in% sampled_ids, ]
+subject_ids <- unique(task_sampled$subject)
+
+```
+
+```{r Fitting model}
+
+# Reset
+
+subject_ids <- unique(task_sampled$subject)
+fit_results <- list()
+
+for (sub in subject_ids) {
+  
+  single_participant_data <- task_sampled[task_sampled$subject == sub, ]
+  
+    # Initial parameter values
+    par_init <- c(
+       rho     = runif(n=1, min=0,   max=5), 
+       epsilon = runif(n=1, min=0,   max=1), 
+       gamma   = runif(n=1, min=0,   max=10),
+       zeta    = runif(n=1, min=0.5, max=1)
+    )
+    
+    # Fit model
+    fit <- optim(
+      par = par_init,
+      fn = overall_likelihood_function,
+      data = single_participant_data,
+      method = "L-BFGS-B",
+      lower = c(1, 0, 0, 0.5),
+      upper = c(3, 1, Inf, 1)
+    )
+    
+  
+  fit_results[[as.character(sub)]] <- list(
+    par = fit$par,
+    negloglik = fit$value,
+    convergence = fit$convergence
+  )
+}
+
+
+# Summarise results
+fit_summary_5 <- do.call(rbind, lapply(names(fit_results), function(sub_id) {
+  res <- fit_results[[sub_id]]
+  data.frame(
+    subject = sub_id,
+    rho = res$par[["rho"]],
+    epsilon = res$par[["epsilon"]],
+    gamma = res$par[["gamma"]],
+    zeta = res$par[["zeta"]],
+    negloglik = res$negloglik,
+    convergence = res$convergence,
+    stringsAsFactors = FALSE
+  )
+}))
+
+
+write.csv(fit_summary_5, "fit_summary_5.csv", row.names = FALSE)
+
+
+
+```
+
+```{r troubleshooting zeta}
+
+hist(fit_summary$zeta, breaks = 20)
+
+
+merged_cm_questionnaire <- fit_summary %>%
+  inner_join(questionnaire, by = c("subject" = "subject_q1"))
+
+merged_cm_questionnaire_sdt <- merged_cm_questionnaire %>%
+  inner_join(blainstats, by = c("subject" = "subject"))
+
+
+plot(merged_cm_questionnaire_sdt$zeta, merged_cm_questionnaire_sdt$accuracy)
+
+plot(fit_summary$zeta, fit_summary$gamma)
+plot(fit_summary$zeta, fit_summary$epsilon)
+
+
+
+
+```
+
+```{r Analysing specific IDs}
+
+id <- blainstats[blainstats$subject == "eh14082005", ]
+id
+
+```
+
+### T.tests comparing fit with different zeta bounds 
+
+```{r Comaring zeta values}
+
+t.test(fit_summary_1$negloglik, fit_summary_2$negloglik, paired=T)
+t.test(fit_summary_1$negloglik, fit_summary_3$negloglik, paired=T)
+t.test(fit_summary_1$negloglik, fit_summary_4$negloglik, paired=T)
+t.test(fit_summary_2$negloglik, fit_summary_3$negloglik, paired=T)
+t.test(fit_summary_2$negloglik, fit_summary_4$negloglik, paired=T)
+t.test(fit_summary_3$negloglik, fit_summary_4$negloglik, paired=T)
+
+## means
+mean(fit_summary_1$negloglik)
+mean(fit_summary_2$negloglik)
+mean(fit_summary_3$negloglik)
+mean(fit_summary_4$negloglik)
+mean(fit_summary_5$negloglik)
+
+```
+
+
+
+
+
+
+
+
