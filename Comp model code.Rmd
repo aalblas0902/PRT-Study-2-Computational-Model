@@ -6,7 +6,7 @@ date: "2025-06-05"
 
 # Setup 
 
-### checking if this works
+### idk if this will work!
 
 In this section, we load the data, and install/load all packages needed for the analyses. 
 
