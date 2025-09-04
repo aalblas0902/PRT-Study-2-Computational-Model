@@ -58,9 +58,16 @@ library(colorspace)
 library(lme4)
 library(lmerTest)
 library(effectsize) 
+library(readr)
 
 
 options(scipen = 999)
+
+```
+
+```{r 0.2 Loading the task data}
+
+task <- read.csv("PRT_task_data.csv")
 
 ```
 
@@ -225,92 +232,6 @@ task <- task %>%
 
 # Convert 'subject' to a factor
 task$subject <- factor(task$subject)
-
-
-```
-
-```{r 1.1.2 blainstats: Creating homebase dataset with all statistics needed}
-
-# Calculating the SDT statistics needed to replicate Blain's analyses 
-
-blainstats <- task %>%
-  group_by(subject, values.blockcount, values.expgroup, values.responsekeyassignment) %>%
-  summarise(
-    HIT = sum(hit), 
-    FA = sum(fa), 
-    MISS = sum(miss), 
-    CR = sum(cr), 
-    HR = HIT / (HIT + MISS),  
-    FAR = FA / (FA + CR), 
-    HR_adj = ifelse(HR == 0, 0.0001, ifelse(HR == 1, 0.9999, HR)),
-    FAR_adj = ifelse(FAR == 0, 0.0001, ifelse(FAR == 1, 0.9999, FAR)),
-    
-    # calculating z-scores for the HIT and FALSE ALARM rates (and adjusting to account for 0 and 1)
-    
-    z_HR = qnorm(HR_adj),
-    z_FAR = qnorm(FAR_adj),
-    z_HR_adj = ifelse(z_HR == 0, 0.0001, z_HR),
-    z_FAR_adj = ifelse(z_FAR == 0, 0.0001, z_FAR),
-    
-    # ordinate 
-    
-    o_HR = dnorm(z_HR_adj),
-    o_FAR = dnorm(z_FAR_adj),
-    
-    # calculating SDT statistics 
-    
-    log_b = 0.5 * log((HIT + 0.5) * (FA + 0.5) / ((MISS + 0.5) * (CR + 0.5))),
-    log_d = 0.5 * log((HIT + 0.5) * (CR + 0.5) / ((MISS + 0.5) * (FA + 0.5))),
-    beta = o_HR / o_FAR,
-    dprime = z_HR_adj - z_FAR_adj,
-    .groups = 'drop'
-  )%>%
-  pivot_wider(
-    names_from = values.blockcount, 
-    values_from = c(HIT, FA, MISS, CR, HR, FAR, HR_adj, FAR_adj, z_HR, z_FAR, z_HR_adj, z_FAR_adj, o_HR, o_FAR, log_b, log_d, beta, dprime)
-  ) %>%
-  mutate(
-    diffscore1_logb = log_b_2 - log_b_1, 
-    diffscore2_logb = log_b_3 - log_b_1, 
-    avbeta = rowMeans(dplyr::select(., starts_with("beta_1"), starts_with("beta_2"), starts_with("beta_3")), na.rm = TRUE),
-    avdprime = rowMeans(dplyr::select(., starts_with("dprime_1"), starts_with("dprime_2"), starts_with("dprime_3")), na.rm = TRUE)
-  ) %>%
-  rowwise() %>%
-  mutate(
-    total_hits = HIT_1 + HIT_2 + HIT_3, 
-    total_cr = CR_1 + CR_2 + CR_3, 
-    total_miss = MISS_1 + MISS_2 + MISS_3, 
-    total_fa = FA_1 + FA_2 + FA_3,
-    total_trials = total_hits + total_cr + total_miss + total_fa,
-    accuracy = (total_hits + total_cr) / total_trials, 
-    log_b_overall = 0.5 * log((total_hits + 0.5) * (total_fa + 0.5) / ((total_miss + 0.5) * (total_cr + 0.5))), 
-    log_d_overall = 0.5 * log((total_hits + 0.5) * (total_cr + 0.5) / ((total_miss + 0.5) * (total_fa + 0.5))), 
-    total_hits_baseline = HIT_2 + HIT_3, 
-    total_cr_baseline = CR_2 + CR_3, 
-    total_miss_baseline = MISS_2 + MISS_3, 
-    total_fa_baseline = FA_2 + FA_3,
-    log_b_baseline = 0.5 * log((total_hits_baseline + 0.5) * (total_fa_baseline + 0.5) / ((total_miss_baseline + 0.5) * (total_cr_baseline + 0.5))), 
-    log_d_baseline = 0.5 * log((total_hits_baseline + 0.5) * (total_cr_baseline + 0.5) / ((total_miss_baseline + 0.5) * (total_fa_baseline + 0.5)))
-  ) %>%
-  ungroup() %>%
-  mutate(
-    bias_group = if_else(log_b_overall > 0, "Positive Bias", "Negative Bias")
-  )
-
-
-length(unique(blainstats$subject))
-# Count how many times each subject appears
-table(blainstats$subject)
-
-# Or, in dplyr:
-library(dplyr)
-blainstats %>%
-  count(subject) %>%
-  arrange(desc(n))
-
-
-questionnairescored_sdt <- blainstats %>%
-  inner_join(questionnaire_scored, by = c("subject" = "subject"))
 
 
 ```
@@ -492,7 +413,7 @@ for (sub in subject_ids) {
     
     # Initial parameter values
     par_init <- c(
-       rho     = runif(n=1, min=,   max=5), 
+       rho     = runif(n=1, min=0,   max=5), 
        epsilon = runif(n=1, min=0,   max=1), 
        gamma   = runif(n=1, min=0,   max=5),
        zeta    = runif(n=1, min=0.5, max=1)
@@ -644,8 +565,8 @@ for (sub in subject_ids) {
       fn = overall_likelihood_function,
       data = single_participant_data,
       method = "L-BFGS-B",
-      lower = c(1, 0, 0, 0.5),
-      upper = c(3, 1, Inf, 1)
+      lower = c(-Inf, 0, 0, 0.5),
+      upper = c(Inf, 1, Inf, 1)
     )
     
   
@@ -658,7 +579,7 @@ for (sub in subject_ids) {
 
 
 # Summarise results
-fit_summary_5 <- do.call(rbind, lapply(names(fit_results), function(sub_id) {
+fit_summary_50 <- do.call(rbind, lapply(names(fit_results), function(sub_id) {
   res <- fit_results[[sub_id]]
   data.frame(
     subject = sub_id,
@@ -673,7 +594,7 @@ fit_summary_5 <- do.call(rbind, lapply(names(fit_results), function(sub_id) {
 }))
 
 
-write.csv(fit_summary_5, "fit_summary_5.csv", row.names = FALSE)
+write.csv(fit_summary_50, "fit_summary_50.csv", row.names = FALSE)
 
 
 
